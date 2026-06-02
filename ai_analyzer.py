@@ -66,23 +66,26 @@ def ai_vision_extract(image_url):
             mime = "image/jpeg"
 
         # 调用视觉 API（OpenAI 兼容格式）
-        prompt = """请从这张招聘图片中提取以下信息。只提取图片中明确可见的文字，不要猜测或补充。
+        prompt = """你是一个招聘信息提取助手。请从这张招聘图片中提取结构化信息。
 
-如果有某个信息，输出完整内容；如果没有，输出 null。
+【重要规则】
+1. 只提取图片中明确可见的文字，绝对不要猜测或编造
+2. 每个字段只输出核心信息，不要输出完整句子或段落
+3. 如果图片中没有某个信息，输出 null
 
-请严格按以下 JSON 格式输出，不要输出其他内容：
-{
-  "links": ["投递链接或招聘平台URL，只输出完整的https链接"],
-  "location": "工作地点",
-  "majors": "招聘专业/学历要求",
-  "target": "招聘对象（如：2026届应届毕业生）",
-  "positions": "招聘岗位名称",
-  "deadline": "截止时间",
-  "apply_method": "报名/投递方式说明",
-  "emails": ["联系邮箱"],
-  "contact": "联系电话或联系人",
-  "raw_text": "图片中所有可见文字的完整摘录（前500字）"
-}"""
+【字段说明】
+- links: 图片中出现的完整URL链接（https://开头），只输出招聘/投递相关的链接
+- location: 工作地点城市名，如"北京"、"北京、上海"，只输出地名，不要输出其他描述
+- target: 招聘对象，如"2026届应届毕业生"、"2026届高校毕业生"，只输出人群描述
+- majors: 招聘专业，如"环境工程、计算机"，只输出专业名称，不要输出"学历要求"等内容
+- positions: 招聘岗位名称，如"纪检专员、财务助理"
+- deadline: 截止时间，如"2026年6月15日"，只输出日期
+- apply_method: 投递方式，如"登录招聘平台投递"、"发送简历至xxx@xxx.com"，只输出一句话
+- emails: 邮箱地址列表
+- contact: 联系电话，如"010-12345678"
+
+【输出格式】严格JSON，不要输出其他内容：
+{"links":[],"location":null,"target":null,"majors":null,"positions":null,"deadline":null,"apply_method":null,"emails":[],"contact":null}"""
 
         payload = {
             "model": AI_VISION_MODEL,
@@ -151,9 +154,6 @@ def ai_vision_extract(image_url):
             result["emails"] = parsed["emails"]
         if parsed.get("contact"):
             result["contact"] = parsed["contact"]
-        # raw_text 只用于展示，不参与结构化提取
-        if parsed.get("raw_text"):
-            result["raw_text"] = parsed["raw_text"]
 
         return result if result else ""
 
@@ -572,27 +572,36 @@ def extract_job_info(text, title=""):
 
 def _validate_ai_field(field, value):
     """验证 AI 提取的字段值是否合理"""
-    if not value or not isinstance(value, str):
+    if not value:
+        return False
+    # 列表转字符串
+    if isinstance(value, list):
+        value = '、'.join(str(v) for v in value if v)
+    if not isinstance(value, str):
         return bool(value)
     value = value.strip()
     if len(value) < 2:
         return False
-    # location：不能太短，不能包含无关关键词
+    # location：不能太短或包含无关内容
     if field == 'location':
         if len(value) < 3:
             return False
-        bad = ['另行通知', '相关要求', '通过电话', '电子邮件', '保持通信', '资格审查']
+        bad = ['另行通知', '相关要求', '通过电话', '电子邮件', '保持通信', '资格审查', '报名应聘']
         if any(w in value for w in bad):
             return False
-    # target：不能包含岗位职责类内容，允许较长的详细描述
+        if len(value) > 50:
+            return False
+    # target：不能包含岗位职责或报名条件类内容
     if field == 'target':
-        if any(w in value for w in ['负责', '从事', '具备', '岗位职责']):
+        bad = ['负责', '从事', '具备', '岗位职责', '以及主要']
+        if any(w in value for w in bad):
             return False
         if len(value) > 200:
             value = value[:200]
     # majors：不能是证书/获奖类内容
     if field == 'majors':
-        if any(w in value for w in ['证书', '获奖', '资格', '以及主要']):
+        bad = ['证书', '获奖', '以及主要']
+        if any(w in value for w in bad):
             return False
     # apply_method：不能太长
     if field == 'apply_method' and len(value) > 150:
@@ -654,9 +663,6 @@ def process_job(job):
         ai_result = ai_vision_extract(img_url)
         if ai_result:
             result["ai_texts"].append(ai_result)
-            # raw_text 加入全文用于展示
-            if isinstance(ai_result, dict) and ai_result.get("raw_text"):
-                all_text += "\n" + ai_result["raw_text"]
 
     # 3. 从 OCR 文字中提取结构化数据
     ocr_combined = "\n".join(result["ocr_texts"])
@@ -680,8 +686,6 @@ def process_job(job):
             if not isinstance(ai_data, dict):
                 continue
             for k, v in ai_data.items():
-                if k == "raw_text":
-                    continue
                 if isinstance(v, list):
                     existing = result["extracted"].get(k, [])
                     if isinstance(existing, str):
