@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+output/
+.agents/
+skills-lock.json
+.env
+*.log
+.claude/
