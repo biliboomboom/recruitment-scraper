@@ -13,10 +13,10 @@ HEADERS = {
 }
 REQUEST_DELAY = 1  # 请求间隔（秒）
 
-# OpenAI API 配置（已停用，当前纯提取模式）
-# OPENAI_API_KEY = ""
-# OPENAI_BASE_URL = ""
-# OPENAI_MODEL = ""
+# AI 视觉 API 配置（用于 OCR 失败时的图片识别兜底）
+AI_VISION_API_KEY = ""  # 填入你的 API key
+AI_VISION_BASE_URL = "https://platform.xiaomimimo.com/v1"  # mimo API 地址
+AI_VISION_MODEL = "mimo-v2-omni"  # 视觉模型
 
 # 输出配置
 OUTPUT_DIR = "output"

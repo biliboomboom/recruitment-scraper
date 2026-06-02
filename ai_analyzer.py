@@ -1,5 +1,6 @@
 import re
 import base64
+import json
 import requests
 from config import HEADERS
 
@@ -27,6 +28,131 @@ def ocr_image(image_url):
         return ""
     except Exception as e:
         # Docker 服务不可用时，回退到无 OCR 模式
+        return ""
+
+
+def ocr_quality_check(ocr_text):
+    """检查 OCR 文字质量，判断是否需要 AI 兜底"""
+    if not ocr_text or len(ocr_text.strip()) < 10:
+        return False
+    # 计算有效字符比例（字母/数字/中文）
+    valid = sum(1 for c in ocr_text if c.isalnum() or '一' <= c <= '鿿')
+    ratio = valid / max(len(ocr_text), 1)
+    return ratio > 0.3  # 有效字符超过 30% 认为质量可接受
+
+
+def ai_vision_extract(image_url):
+    """用多模态 AI 从图片中提取招聘信息（OCR 失败时的兜底）"""
+    from config import AI_VISION_API_KEY, AI_VISION_BASE_URL, AI_VISION_MODEL
+    if not AI_VISION_API_KEY:
+        return ""
+
+    try:
+        # 下载图片转 base64
+        resp = requests.get(image_url, timeout=15, headers={
+            "User-Agent": HEADERS["User-Agent"],
+            "Referer": "https://mp.weixin.qq.com/"
+        })
+        resp.raise_for_status()
+        b64 = base64.b64encode(resp.content).decode()
+
+        # 检测图片类型
+        content_type = resp.headers.get("content-type", "image/jpeg")
+        if "png" in content_type:
+            mime = "image/png"
+        elif "gif" in content_type:
+            mime = "image/gif"
+        else:
+            mime = "image/jpeg"
+
+        # 调用视觉 API（OpenAI 兼容格式）
+        prompt = """请从这张招聘图片中提取以下信息。只提取图片中明确可见的文字，不要猜测或补充。
+
+如果有某个信息，输出完整内容；如果没有，输出 null。
+
+请严格按以下 JSON 格式输出，不要输出其他内容：
+{
+  "links": ["投递链接或招聘平台URL，只输出完整的https链接"],
+  "location": "工作地点",
+  "majors": "招聘专业/学历要求",
+  "target": "招聘对象（如：2026届应届毕业生）",
+  "positions": "招聘岗位名称",
+  "deadline": "截止时间",
+  "apply_method": "报名/投递方式说明",
+  "emails": ["联系邮箱"],
+  "contact": "联系电话或联系人",
+  "raw_text": "图片中所有可见文字的完整摘录（前500字）"
+}"""
+
+        payload = {
+            "model": AI_VISION_MODEL,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:{mime};base64,{b64}"
+                            }
+                        }
+                    ]
+                }
+            ],
+            "max_tokens": 1000,
+            "temperature": 0.1
+        }
+
+        result = requests.post(
+            f"{AI_VISION_BASE_URL}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {AI_VISION_API_KEY}",
+                "Content-Type": "application/json"
+            },
+            json=payload,
+            timeout=60
+        )
+        data = result.json()
+        content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+
+        # 尝试解析 JSON
+        # 兼容 AI 可能输出 markdown 代码块的情况
+        content = content.strip()
+        if content.startswith("```"):
+            content = content.split("\n", 1)[-1]
+            if content.endswith("```"):
+                content = content[:-3]
+            content = content.strip()
+
+        parsed = json.loads(content)
+
+        # 组装成文本返回（复用现有正则提取逻辑）
+        parts = []
+        if parsed.get("raw_text"):
+            parts.append(parsed["raw_text"])
+        if parsed.get("links"):
+            parts.extend(parsed["links"])
+        if parsed.get("location"):
+            parts.append(f"工作地点：{parsed['location']}")
+        if parsed.get("majors"):
+            parts.append(f"招聘专业：{parsed['majors']}")
+        if parsed.get("target"):
+            parts.append(f"招聘对象：{parsed['target']}")
+        if parsed.get("positions"):
+            parts.append(f"招聘岗位：{parsed['positions']}")
+        if parsed.get("deadline"):
+            parts.append(f"截止时间：{parsed['deadline']}")
+        if parsed.get("apply_method"):
+            parts.append(f"投递方式：{parsed['apply_method']}")
+        if parsed.get("emails"):
+            parts.extend(parsed["emails"])
+        if parsed.get("contact"):
+            parts.append(f"联系方式：{parsed['contact']}")
+
+        return "\n".join(parts) if parts else ""
+
+    except Exception as e:
         return ""
 
 
@@ -440,7 +566,7 @@ def extract_job_info(text, title=""):
 
 
 def process_job(job):
-    """处理单条招聘信息 - 纯提取，无 AI"""
+    """处理单条招聘信息 - 折中模式：OCR + AI 兜底"""
     content = job.get("content", "")
     all_text = content
     images = job.get("images", [])
@@ -449,6 +575,7 @@ def process_job(job):
         "raw_content": content,
         "ocr_texts": [],
         "qr_links": [],
+        "ai_texts": [],
         "extracted": {},
     }
 
@@ -476,7 +603,6 @@ def process_job(job):
         qr_urls = detect_qr_codes(img_url)
         if qr_urls:
             result["qr_links"].extend(qr_urls)
-            # QR 链接直接加入提取结果
             if "links" not in result["extracted"]:
                 result["extracted"]["links"] = []
             result["extracted"]["links"] = qr_urls + result["extracted"]["links"]
@@ -488,6 +614,13 @@ def process_job(job):
             if cleaned:
                 result["ocr_texts"].append(cleaned)
                 all_text += "\n" + cleaned
+
+        # AI 兜底：OCR 质量不够时用视觉模型
+        if not ocr_quality_check(ocr_text):
+            ai_text = ai_vision_extract(img_url)
+            if ai_text:
+                result["ai_texts"].append(ai_text)
+                all_text += "\n" + ai_text
 
     # 3. 从 OCR 文字中提取结构化数据
     ocr_combined = "\n".join(result["ocr_texts"])
@@ -504,6 +637,17 @@ def process_job(job):
         if "links" not in result["extracted"]:
             result["extracted"]["links"] = []
         result["extracted"]["links"] = fuzzy_urls + result["extracted"]["links"]
+
+    # 3.6 从 AI 视觉文字中提取结构化数据
+    if result["ai_texts"]:
+        ai_combined = "\n".join(result["ai_texts"])
+        ai_info = extract_job_info(ai_combined)
+        for k, v in ai_info.items():
+            if k not in result["extracted"] or not result["extracted"][k]:
+                result["extracted"][k] = v
+            elif isinstance(v, list):
+                existing = result["extracted"].get(k, [])
+                result["extracted"][k] = existing + [x for x in v if x not in existing]
 
     # 4. QR 码跳转页面
     if result["qr_links"]:
@@ -563,6 +707,7 @@ def process_all(jobs):
         extracted = process_job(job)
         job["extracted"] = extracted["extracted"]
         job["ocr_texts"] = extracted["ocr_texts"]
+        job["ai_texts"] = extracted.get("ai_texts", [])
         job["full_text"] = extracted["full_text"]
         if "landing_text" in extracted:
             job["landing_text"] = extracted["landing_text"]
