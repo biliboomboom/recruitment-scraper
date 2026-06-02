@@ -16,7 +16,7 @@ REQUEST_DELAY = 1
 
 # AI 视觉 API 配置（用于 OCR 失败时的图片识别兜底）
 AI_VISION_API_KEY = ""  # 填入你的 API key
-AI_VISION_BASE_URL = "https://platform.xiaomimimo.com/v1"
+AI_VISION_BASE_URL = "https://token-plan-cn.xiaomimimo.com/v1"
 AI_VISION_MODEL = "mimo-v2-omni"
 
 # 输出配置

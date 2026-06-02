@@ -33,12 +33,12 @@ def ocr_image(image_url):
 
 def ocr_quality_check(ocr_text):
     """检查 OCR 文字质量，判断是否需要 AI 兜底"""
-    if not ocr_text or len(ocr_text.strip()) < 10:
+    if not ocr_text or len(ocr_text.strip()) < 20:
         return False
     # 计算有效字符比例（字母/数字/中文）
     valid = sum(1 for c in ocr_text if c.isalnum() or '一' <= c <= '鿿')
     ratio = valid / max(len(ocr_text), 1)
-    return ratio > 0.3  # 有效字符超过 30% 认为质量可接受
+    return ratio > 0.5  # 有效字符超过 50% 才认为质量可接受
 
 
 def ai_vision_extract(image_url):
@@ -100,7 +100,7 @@ def ai_vision_extract(image_url):
                     ]
                 }
             ],
-            "max_tokens": 1000,
+            "max_tokens": 2000,
             "temperature": 0.1
         }
 
@@ -111,10 +111,14 @@ def ai_vision_extract(image_url):
                 "Content-Type": "application/json"
             },
             json=payload,
-            timeout=60
+            timeout=120
         )
         data = result.json()
-        content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        msg = data.get("choices", [{}])[0].get("message", {})
+        content = msg.get("content", "")
+        # mimo 模型可能把内容放在 reasoning_content 里
+        if not content:
+            content = msg.get("reasoning_content", "")
 
         # 尝试解析 JSON
         # 兼容 AI 可能输出 markdown 代码块的情况
@@ -127,30 +131,31 @@ def ai_vision_extract(image_url):
 
         parsed = json.loads(content)
 
-        # 组装成文本返回（复用现有正则提取逻辑）
-        parts = []
-        if parsed.get("raw_text"):
-            parts.append(parsed["raw_text"])
+        # 返回结构化数据（不再组装成文本给正则处理）
+        result = {}
         if parsed.get("links"):
-            parts.extend(parsed["links"])
+            result["links"] = parsed["links"]
         if parsed.get("location"):
-            parts.append(f"工作地点：{parsed['location']}")
+            result["location"] = parsed["location"]
         if parsed.get("majors"):
-            parts.append(f"招聘专业：{parsed['majors']}")
+            result["majors"] = parsed["majors"]
         if parsed.get("target"):
-            parts.append(f"招聘对象：{parsed['target']}")
+            result["target"] = parsed["target"]
         if parsed.get("positions"):
-            parts.append(f"招聘岗位：{parsed['positions']}")
+            result["positions"] = parsed["positions"]
         if parsed.get("deadline"):
-            parts.append(f"截止时间：{parsed['deadline']}")
+            result["deadline"] = parsed["deadline"]
         if parsed.get("apply_method"):
-            parts.append(f"投递方式：{parsed['apply_method']}")
+            result["apply_method"] = parsed["apply_method"]
         if parsed.get("emails"):
-            parts.extend(parsed["emails"])
+            result["emails"] = parsed["emails"]
         if parsed.get("contact"):
-            parts.append(f"联系方式：{parsed['contact']}")
+            result["contact"] = parsed["contact"]
+        # raw_text 只用于展示，不参与结构化提取
+        if parsed.get("raw_text"):
+            result["raw_text"] = parsed["raw_text"]
 
-        return "\n".join(parts) if parts else ""
+        return result if result else ""
 
     except Exception as e:
         return ""
@@ -565,6 +570,36 @@ def extract_job_info(text, title=""):
     return info
 
 
+def _validate_ai_field(field, value):
+    """验证 AI 提取的字段值是否合理"""
+    if not value or not isinstance(value, str):
+        return bool(value)
+    value = value.strip()
+    if len(value) < 2:
+        return False
+    # location：不能太短，不能包含无关关键词
+    if field == 'location':
+        if len(value) < 3:
+            return False
+        bad = ['另行通知', '相关要求', '通过电话', '电子邮件', '保持通信', '资格审查']
+        if any(w in value for w in bad):
+            return False
+    # target：不能包含岗位职责类内容，允许较长的详细描述
+    if field == 'target':
+        if any(w in value for w in ['负责', '从事', '具备', '岗位职责']):
+            return False
+        if len(value) > 200:
+            value = value[:200]
+    # majors：不能是证书/获奖类内容
+    if field == 'majors':
+        if any(w in value for w in ['证书', '获奖', '资格', '以及主要']):
+            return False
+    # apply_method：不能太长
+    if field == 'apply_method' and len(value) > 150:
+        return False
+    return True
+
+
 def process_job(job):
     """处理单条招聘信息 - 折中模式：OCR + AI 兜底"""
     content = job.get("content", "")
@@ -615,12 +650,13 @@ def process_job(job):
                 result["ocr_texts"].append(cleaned)
                 all_text += "\n" + cleaned
 
-        # AI 兜底：OCR 质量不够时用视觉模型
-        if not ocr_quality_check(ocr_text):
-            ai_text = ai_vision_extract(img_url)
-            if ai_text:
-                result["ai_texts"].append(ai_text)
-                all_text += "\n" + ai_text
+        # AI 视觉提取（始终触发，返回结构化 dict）
+        ai_result = ai_vision_extract(img_url)
+        if ai_result:
+            result["ai_texts"].append(ai_result)
+            # raw_text 加入全文用于展示
+            if isinstance(ai_result, dict) and ai_result.get("raw_text"):
+                all_text += "\n" + ai_result["raw_text"]
 
     # 3. 从 OCR 文字中提取结构化数据
     ocr_combined = "\n".join(result["ocr_texts"])
@@ -638,16 +674,32 @@ def process_job(job):
             result["extracted"]["links"] = []
         result["extracted"]["links"] = fuzzy_urls + result["extracted"]["links"]
 
-    # 3.6 从 AI 视觉文字中提取结构化数据
+    # 3.6 合并 AI 视觉的结构化数据（直接使用 AI 返回的字段，不再走正则）
     if result["ai_texts"]:
-        ai_combined = "\n".join(result["ai_texts"])
-        ai_info = extract_job_info(ai_combined)
-        for k, v in ai_info.items():
-            if k not in result["extracted"] or not result["extracted"][k]:
-                result["extracted"][k] = v
-            elif isinstance(v, list):
-                existing = result["extracted"].get(k, [])
-                result["extracted"][k] = existing + [x for x in v if x not in existing]
+        for ai_data in result["ai_texts"]:
+            if not isinstance(ai_data, dict):
+                continue
+            for k, v in ai_data.items():
+                if k == "raw_text":
+                    continue
+                if isinstance(v, list):
+                    existing = result["extracted"].get(k, [])
+                    if isinstance(existing, str):
+                        existing = [existing] if existing else []
+                    result["extracted"][k] = existing + [x for x in v if x not in existing]
+                elif v and _validate_ai_field(k, v):
+                    result["extracted"][k] = v
+
+    # 3.7 AI 后处理：清理可疑值
+    extracted = result["extracted"]
+    noise_words = ['另行通知', '相关要求', '通过电话', '短信或', '电子邮件', '保持通信']
+    for field in ['location', 'target', 'majors', 'positions']:
+        val = extracted.get(field, '')
+        if val and any(w in val for w in noise_words):
+            del extracted[field]
+    # location 过长可能是误提取
+    if extracted.get('location') and len(extracted['location']) > 60:
+        del extracted['location']
 
     # 4. QR 码跳转页面
     if result["qr_links"]:
