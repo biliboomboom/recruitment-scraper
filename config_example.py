@@ -1,4 +1,5 @@
 # 招聘信息爬虫配置
+# 复制此文件为 config.py 并填入你的配置
 
 # 目标网站
 BASE_URL = "http://job.mohrss.gov.cn/qyzp"
@@ -11,12 +12,12 @@ HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
 }
-REQUEST_DELAY = 1  # 请求间隔（秒）
+REQUEST_DELAY = 1
 
 # AI 视觉 API 配置（用于 OCR 失败时的图片识别兜底）
 AI_VISION_API_KEY = ""  # 填入你的 API key
-AI_VISION_BASE_URL = "https://platform.xiaomimimo.com/v1"  # mimo API 地址
-AI_VISION_MODEL = "mimo-v2-omni"  # 视觉模型
+AI_VISION_BASE_URL = "https://platform.xiaomimimo.com/v1"
+AI_VISION_MODEL = "mimo-v2-omni"
 
 # 输出配置
 OUTPUT_DIR = "output"

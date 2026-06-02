@@ -6,3 +6,4 @@ skills-lock.json
 .env
 *.log
 .claude/
+config.py
